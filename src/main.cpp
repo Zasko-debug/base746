@@ -1,10 +1,6 @@
 /*
- * ETAPE 1 — REPROGRAMMATION ADRESSE I2C
- * ======================================
- * Brancher UNIQUEMENT le capteur à reprogrammer (futur capteur 2)
- * Flasher ce fichier, laisser tourner 3 secondes, c'est bon.
- * Ce capteur aura ensuite l'adresse 0xE2 en permanence (EEPROM).
- * Ensuite passer au main.cpp normal avec les deux capteurs.
+ * TEST SIMPLE — Un seul capteur SRF08 sur 0xE0
+ * Affiche la distance sur l'écran, se rafraîchit toutes les 200ms
  */
 
 #include "lvgl.h"
@@ -18,6 +14,17 @@ I2C_HandleTypeDef hi2c1;
 
 static void I2C1_Init()
 {
+    /* GPIO PB8=SCL, PB9=SDA */
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    GPIO_InitStruct.Pin       = GPIO_PIN_8 | GPIO_PIN_9;
+    GPIO_InitStruct.Mode      = GPIO_MODE_AF_OD;
+    GPIO_InitStruct.Pull      = GPIO_PULLUP;
+    GPIO_InitStruct.Speed     = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+    __HAL_RCC_I2C1_CLK_ENABLE();
     hi2c1.Instance             = I2C1;
     hi2c1.Init.Timing          = 0x00C0EAFF;
     hi2c1.Init.OwnAddress1     = 0;
@@ -28,68 +35,107 @@ static void I2C1_Init()
     HAL_I2C_Init(&hi2c1);
 }
 
-static void show_result(uint8_t success)
+/* Lit la distance en cm sur le SRF08 à l'adresse 0xE0 */
+static uint16_t SRF08_ReadDistance()
+{
+    /* Lancer la mesure */
+    uint8_t cmd[2] = {0x00, 0x51};
+    if (HAL_I2C_Master_Transmit(&hi2c1, 0xE0, cmd, 2, 100) != HAL_OK)
+        return 9999; /* Erreur */
+
+    /* Attendre fin de mesure */
+    HAL_Delay(70);
+
+    /* Lire les 3 registres : lumière + distance haute + distance basse */
+    uint8_t reg = 0x01;
+    uint8_t raw[3] = {0};
+    if (HAL_I2C_Master_Transmit(&hi2c1, 0xE0, &reg, 1, 100) != HAL_OK)
+        return 9999;
+    if (HAL_I2C_Master_Receive(&hi2c1, 0xE0, raw, 3, 100) != HAL_OK)
+        return 9999;
+
+    return ((uint16_t)raw[1] << 8) | raw[2];
+}
+
+/* ── Widgets ── */
+static lv_obj_t *lbl_distance;
+static lv_obj_t *lbl_status;
+static lv_obj_t *bar;
+
+static void build_ui()
 {
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x0D1117), 0);
 
+    /* Titre */
     lv_obj_t *title = lv_label_create(scr);
-    lv_label_set_text(title, "REPROGRAMMATION ADRESSE I2C");
-    lv_obj_set_style_text_color(title, lv_color_hex(0xE6EDF3), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+    lv_label_set_text(title, "TEST SRF08");
+    lv_obj_set_style_text_color(title, lv_color_hex(0x00D4FF), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
 
-    lv_obj_t *lbl = lv_label_create(scr);
-    if (success) {
-        lv_label_set_text(lbl,
-            LV_SYMBOL_OK "  Capteur detecte sur 0xE0\n\n"
-            LV_SYMBOL_OK "  Adresse reprogrammee en 0xE2\n\n"
-            "Colle un scotch sur ce capteur\n"
-            "C'est maintenant le CAPTEUR 2");
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0x3FB950), 0);
+    /* Adresse */
+    lv_obj_t *addr = lv_label_create(scr);
+    lv_label_set_text(addr, "Capteur : 0xE0  |  I2C1 PB8/PB9");
+    lv_obj_set_style_text_color(addr, lv_color_hex(0x8B949E), 0);
+    lv_obj_align(addr, LV_ALIGN_TOP_MID, 0, 40);
+
+    /* Distance en grand */
+    lbl_distance = lv_label_create(scr);
+    lv_label_set_text(lbl_distance, "--- cm");
+    lv_obj_set_style_text_color(lbl_distance, lv_color_hex(0x3FB950), 0);
+    lv_obj_align(lbl_distance, LV_ALIGN_CENTER, 0, -20);
+
+    /* Barre de progression */
+    bar = lv_bar_create(scr);
+    lv_obj_set_size(bar, 400, 20);
+    lv_obj_align(bar, LV_ALIGN_CENTER, 0, 30);
+    lv_bar_set_range(bar, 0, 400);
+    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x21262D), LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_hex(0x3FB950), LV_PART_INDICATOR);
+
+    /* Statut I2C */
+    lbl_status = lv_label_create(scr);
+    lv_label_set_text(lbl_status, "En attente...");
+    lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x8B949E), 0);
+    lv_obj_align(lbl_status, LV_ALIGN_BOTTOM_MID, 0, -15);
+}
+
+static void update_ui(uint16_t dist)
+{
+    char buf[32];
+
+    if (dist == 9999) {
+        lv_label_set_text(lbl_distance, "ERREUR");
+        lv_obj_set_style_text_color(lbl_distance, lv_color_hex(0xFF4444), 0);
+        lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+        lv_label_set_text(lbl_status, LV_SYMBOL_CLOSE " Capteur non detecte sur 0xE0");
+        lv_obj_set_style_text_color(lbl_status, lv_color_hex(0xFF4444), 0);
     } else {
-        lv_label_set_text(lbl,
-            LV_SYMBOL_CLOSE "  Capteur NON detecte sur 0xE0\n\n"
-            "Verifier le cablage I2C :\n"
-            "- SDA sur PB9\n"
-            "- SCL sur PB8\n"
-            "- VCC 3.3V et GND branches\n"
-            "- Pull-up 4.7k sur SDA et SCL");
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFF4444), 0);
+        /* Couleur selon distance */
+        lv_color_t col;
+        if (dist < 20)       col = lv_color_hex(0xFF4444); /* Rouge  */
+        else if (dist < 50)  col = lv_color_hex(0xFFD700); /* Jaune  */
+        else                 col = lv_color_hex(0x3FB950); /* Vert   */
+
+        snprintf(buf, sizeof(buf), "%d cm", dist);
+        lv_label_set_text(lbl_distance, buf);
+        lv_obj_set_style_text_color(lbl_distance, col, 0);
+
+        int bar_val = 400 - dist;
+        if (bar_val < 0) bar_val = 0;
+        lv_bar_set_value(bar, bar_val, LV_ANIM_ON);
+        lv_obj_set_style_bg_color(bar, col, LV_PART_INDICATOR);
+
+        lv_label_set_text(lbl_status, LV_SYMBOL_OK " Capteur OK");
+        lv_obj_set_style_text_color(lbl_status, lv_color_hex(0x3FB950), 0);
     }
-    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
 }
 
 void mySetup()
 {
-    // Activer pull-up internes sur PB8 (SCL) et PB9 (SDA)
-GPIO_InitTypeDef GPIO_InitStruct = {0};
-__HAL_RCC_GPIOB_CLK_ENABLE();
-GPIO_InitStruct.Pin   = GPIO_PIN_8 | GPIO_PIN_9;
-GPIO_InitStruct.Mode  = GPIO_MODE_AF_OD;
-GPIO_InitStruct.Pull  = GPIO_PULLUP;
-GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
-HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
     I2C1_Init();
-
-    /* Vérifie que le capteur répond sur 0xE0 */
-    uint8_t detected = HAL_I2C_IsDeviceReady(&hi2c1, 0xE0, 3, 100) == HAL_OK;
-
-    if (detected) {
-        /* Séquence de reprogrammation SRF08 */
-        uint8_t seq[2];
-        seq[0] = 0x00; seq[1] = 0xA0;
-        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
-        seq[1] = 0xAA;
-        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
-        seq[1] = 0xA5;
-        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
-        seq[1] = 0xE2;
-        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
-        HAL_Delay(200); /* Laisse l'EEPROM sauvegarder */
-    }
-
-    show_result(detected);
+    build_ui();
 }
 
 void loop() {}
@@ -99,8 +145,9 @@ void myTask(void *pvParameters)
     TickType_t xLastWakeTime = xTaskGetTickCount();
     while (1)
     {
-        /* Rien à faire, on attend juste */
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+        uint16_t dist = SRF08_ReadDistance();
+        update_ui(dist);
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(200));
     }
 }
 
@@ -109,17 +156,11 @@ void myTask(void *pvParameters)
 
 int main(void)
 {
-    printf("Simulateur — ecran reprogrammation\n");
+    printf("Simulateur — Test SRF08\n");
     lv_init();
     hal_setup();
-
-    lv_obj_t *scr = lv_screen_active();
-    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0D1117), 0);
-    lv_obj_t *lbl = lv_label_create(scr);
-    lv_label_set_text(lbl, "Ce fichier est uniquement pour la STM32\nPas de simulation disponible");
-    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFD700), 0);
-    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
-
+    build_ui();
+    update_ui(123);
     hal_loop();
     return 0;
 }
