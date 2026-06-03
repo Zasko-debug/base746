@@ -1,97 +1,126 @@
+/*
+ * ETAPE 1 — REPROGRAMMATION ADRESSE I2C
+ * ======================================
+ * Brancher UNIQUEMENT le capteur à reprogrammer (futur capteur 2)
+ * Flasher ce fichier, laisser tourner 3 secondes, c'est bon.
+ * Ce capteur aura ensuite l'adresse 0xE2 en permanence (EEPROM).
+ * Ensuite passer au main.cpp normal avec les deux capteurs.
+ */
+
 #include "lvgl.h"
-
-static void event_handler(lv_event_t * e)
-{
-    lv_event_code_t code = lv_event_get_code(e);
-
-    if(code == LV_EVENT_CLICKED) {
-        LV_LOG_USER("Clicked");
-    }
-    else if(code == LV_EVENT_VALUE_CHANGED) {
-        LV_LOG_USER("Toggled");
-    }
-}
-
-void testLvgl()
-{
-  // Initialisations générales
-  lv_obj_t * label;
-
-  lv_obj_t * btn1 = lv_button_create(lv_screen_active());
-  lv_obj_add_event_cb(btn1, event_handler, LV_EVENT_ALL, NULL);
-  lv_obj_align(btn1, LV_ALIGN_CENTER, 0, -40);
-  lv_obj_remove_flag(btn1, LV_OBJ_FLAG_PRESS_LOCK);
-
-  label = lv_label_create(btn1);
-  lv_label_set_text(label, "Button");
-  lv_obj_center(label);
-
-  lv_obj_t * btn2 = lv_button_create(lv_screen_active());
-  lv_obj_add_event_cb(btn2, event_handler, LV_EVENT_ALL, NULL);
-  lv_obj_align(btn2, LV_ALIGN_CENTER, 0, 40);
-  lv_obj_add_flag(btn2, LV_OBJ_FLAG_CHECKABLE);
-  lv_obj_set_height(btn2, LV_SIZE_CONTENT);
-
-  label = lv_label_create(btn2);
-  lv_label_set_text(label, "Toggle");
-  lv_obj_center(label);
-}
+#include <stdio.h>
 
 #ifdef ARDUINO
-
 #include "lvglDrivers.h"
+#include "stm32f7xx_hal.h"
 
-// à décommenter pour tester la démo
-// #include "demos/lv_demos.h"
+I2C_HandleTypeDef hi2c1;
+
+static void I2C1_Init()
+{
+    hi2c1.Instance             = I2C1;
+    hi2c1.Init.Timing          = 0x00C0EAFF;
+    hi2c1.Init.OwnAddress1     = 0;
+    hi2c1.Init.AddressingMode  = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode   = I2C_NOSTRETCH_DISABLE;
+    HAL_I2C_Init(&hi2c1);
+}
+
+static void show_result(uint8_t success)
+{
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0D1117), 0);
+
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "REPROGRAMMATION ADRESSE I2C");
+    lv_obj_set_style_text_color(title, lv_color_hex(0xE6EDF3), 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+    lv_obj_t *lbl = lv_label_create(scr);
+    if (success) {
+        lv_label_set_text(lbl,
+            LV_SYMBOL_OK "  Capteur detecte sur 0xE0\n\n"
+            LV_SYMBOL_OK "  Adresse reprogrammee en 0xE2\n\n"
+            "Colle un scotch sur ce capteur\n"
+            "C'est maintenant le CAPTEUR 2");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x3FB950), 0);
+    } else {
+        lv_label_set_text(lbl,
+            LV_SYMBOL_CLOSE "  Capteur NON detecte sur 0xE0\n\n"
+            "Verifier le cablage I2C :\n"
+            "- SDA sur PB9\n"
+            "- SCL sur PB8\n"
+            "- VCC 3.3V et GND branches\n"
+            "- Pull-up 4.7k sur SDA et SCL");
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0xFF4444), 0);
+    }
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
+}
 
 void mySetup()
 {
-  // à décommenter pour tester la démo
-  // lv_demo_widgets();
+    // Activer pull-up internes sur PB8 (SCL) et PB9 (SDA)
+GPIO_InitTypeDef GPIO_InitStruct = {0};
+__HAL_RCC_GPIOB_CLK_ENABLE();
+GPIO_InitStruct.Pin   = GPIO_PIN_8 | GPIO_PIN_9;
+GPIO_InitStruct.Mode  = GPIO_MODE_AF_OD;
+GPIO_InitStruct.Pull  = GPIO_PULLUP;
+GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+GPIO_InitStruct.Alternate = GPIO_AF4_I2C1;
+HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    I2C1_Init();
 
-  // Initialisations générales
-  testLvgl();
+    /* Vérifie que le capteur répond sur 0xE0 */
+    uint8_t detected = HAL_I2C_IsDeviceReady(&hi2c1, 0xE0, 3, 100) == HAL_OK;
+
+    if (detected) {
+        /* Séquence de reprogrammation SRF08 */
+        uint8_t seq[2];
+        seq[0] = 0x00; seq[1] = 0xA0;
+        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
+        seq[1] = 0xAA;
+        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
+        seq[1] = 0xA5;
+        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
+        seq[1] = 0xE2;
+        HAL_I2C_Master_Transmit(&hi2c1, 0xE0, seq, 2, 100);
+        HAL_Delay(200); /* Laisse l'EEPROM sauvegarder */
+    }
+
+    show_result(detected);
 }
 
-void loop()
-{
-  // Inactif (pour mise en veille du processeur)
-}
+void loop() {}
 
 void myTask(void *pvParameters)
 {
-  // Init
-  TickType_t xLastWakeTime;
-  // Lecture du nombre de ticks quand la tâche débute
-  xLastWakeTime = xTaskGetTickCount();
-  while (1)
-  {
-    // Loop
-
-    // Endort la tâche pendant le temps restant par rapport au réveil,
-    // ici 200ms, donc la tâche s'effectue toutes les 200ms
-    vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(200)); // toutes les 200 ms
-  }
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    while (1)
+    {
+        /* Rien à faire, on attend juste */
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000));
+    }
 }
 
 #else
-
-#include "lvgl.h"
 #include "app_hal.h"
-#include <cstdio>
 
 int main(void)
 {
-  printf("LVGL Simulator\n");
-  fflush(stdout);
+    printf("Simulateur — ecran reprogrammation\n");
+    lv_init();
+    hal_setup();
 
-  lv_init();
-  hal_setup();
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0D1117), 0);
+    lv_obj_t *lbl = lv_label_create(scr);
+    lv_label_set_text(lbl, "Ce fichier est uniquement pour la STM32\nPas de simulation disponible");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(0xFFD700), 0);
+    lv_obj_align(lbl, LV_ALIGN_CENTER, 0, 0);
 
-  testLvgl();
-
-  hal_loop();
-  return 0;
+    hal_loop();
+    return 0;
 }
-
 #endif
