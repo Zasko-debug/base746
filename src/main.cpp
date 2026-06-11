@@ -46,16 +46,12 @@ void loop() {}
 #define LV_IMAGE_DECLARE(var_name) extern const lv_image_dsc_t var_name
 #endif
 
-/* Images utilisées :
-   - menu_bg : fond uniquement pour le menu principal
-   - logo_pong / logo_dodge : logos des cartes de jeux
+/* Image utilisée :
+   - menu_bg : fond complet du menu principal
 
-   IMPORTANT FLASH : garder seulement ces 3 fichiers dans src/images :
-   menu_bg.c, logo_pong.c, logo_dodge.c
-   Supprimer/déplacer pong_bg.c, dodge_bg.c, victory_bg.c, defeat_bg.c. */
+   IMPORTANT FLASH : garder uniquement menu_bg.c dans src/images/.
+   Les logos PONG/DODGE ont été supprimés pour économiser la FLASH. */
 LV_IMAGE_DECLARE(menu_bg);
-LV_IMAGE_DECLARE(logo_pong);
-LV_IMAGE_DECLARE(logo_dodge);
 
 #ifdef ARDUINO
 #include "lvglDrivers.h"
@@ -278,7 +274,10 @@ static uint16_t get_filtered_cm(const SensorFilter_t *f)
 typedef enum {
     APP_MENU = 0,
     APP_PONG,
-    APP_DODGE
+    APP_DODGE,
+    APP_CALIBRATION,
+    APP_INFO,
+    APP_AUDIT
 } AppMode_t;
 
 typedef enum {
@@ -293,6 +292,20 @@ static uint16_t g_left_cm = 20;
 static uint16_t g_right_cm = 20;
 static uint8_t  g_left_ok = 0;
 static uint8_t  g_right_ok = 0;
+
+/* Améliorations démo : calibrage, audit capteurs et meilleurs scores.
+   Valeurs par défaut conservatrices, modifiables depuis l'écran CALIBRAGE. */
+static uint16_t cal_left_near_cm  = 8;
+static uint16_t cal_left_far_cm   = 42;
+static uint16_t cal_right_near_cm = 10;
+static uint16_t cal_right_far_cm  = 45;
+static uint32_t best_dodge_score  = 0;
+static uint8_t  best_pong_left    = 0;
+static uint8_t  best_pong_right   = 0;
+
+static lv_obj_t *audit_lbl_left = NULL;
+static lv_obj_t *audit_lbl_right = NULL;
+static lv_obj_t *audit_lbl_quality = NULL;
 
 /* Objets communs */
 static lv_obj_t *common_btn_menu = NULL;
@@ -316,8 +329,15 @@ static int map_distance_to_y(uint16_t cm, int obj_h)
 
 static int map_pong_distance_to_y(uint16_t cm, int obj_h, uint8_t right_side)
 {
-    int min_cm = right_side ? PONG_RIGHT_MIN_CM : PONG_LEFT_MIN_CM;
-    int max_cm = right_side ? PONG_RIGHT_MAX_CM : PONG_LEFT_MAX_CM;
+    int min_cm = right_side ? (int)cal_right_near_cm : (int)cal_left_near_cm;
+    int max_cm = right_side ? (int)cal_right_far_cm  : (int)cal_left_far_cm;
+
+    /* Sécurité : évite une division par zéro si le calibrage est raté. */
+    if (max_cm <= min_cm + 5) {
+        min_cm = right_side ? PONG_RIGHT_MIN_CM : PONG_LEFT_MIN_CM;
+        max_cm = right_side ? PONG_RIGHT_MAX_CM : PONG_LEFT_MAX_CM;
+    }
+
     int d = clamp_int((int)cm, min_cm, max_cm);
 
     int top = PLAY_TOP + PONG_PADDLE_MARGIN;
@@ -369,8 +389,8 @@ static void style_panel(lv_obj_t *obj, uint32_t bg, uint32_t border, lv_coord_t 
     lv_obj_set_style_border_color(obj, lv_color_hex(border), 0);
     lv_obj_set_style_border_width(obj, 1, 0);
     lv_obj_set_style_radius(obj, radius, 0);
-    lv_obj_set_style_shadow_width(obj, 10, 0);
-    lv_obj_set_style_shadow_opa(obj, LV_OPA_20, 0);
+    lv_obj_set_style_shadow_width(obj, 0, 0);
+    lv_obj_set_style_shadow_opa(obj, LV_OPA_TRANSP, 0);
 }
 
 static void style_plain_obj(lv_obj_t *obj, uint32_t color, lv_coord_t radius)
@@ -398,6 +418,7 @@ static lv_obj_t *make_box(lv_obj_t *parent, int x, int y, int w, int h,
     lv_obj_set_style_border_width(o, border ? 1 : 0, 0);
     lv_obj_set_style_radius(o, radius, 0);
     lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
     return o;
 }
 
@@ -449,24 +470,18 @@ static void add_neon_frame(lv_obj_t *scr, int top, int bottom)
 
 static void add_pong_card_art(lv_obj_t *parent)
 {
-    lv_obj_t *logo = lv_image_create(parent);
-    lv_image_set_src(logo, &logo_pong);
-    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 4);
-
-    lv_obj_t *hint = make_box(parent, 34, 88, 136, 20, 0x08111F, COL_BLUE, 10);
-    lv_obj_set_style_bg_opa(hint, LV_OPA_70, 0);
-    make_label(hint, "TOUCHER", COL_BLUE, LV_ALIGN_CENTER, 0, 0);
+    /* Logos supprimés : dessin léger en LVGL. */
+    make_label(parent, "PONG", COL_TEXT, LV_ALIGN_TOP_MID, 0, 18);
+    make_label(parent, "Duel ultrason", COL_MUTED, LV_ALIGN_TOP_MID, 0, 48);
+    make_label(parent, "TOUCHER", COL_BLUE, LV_ALIGN_BOTTOM_MID, 0, -12);
 }
 
 static void add_dodge_card_art(lv_obj_t *parent)
 {
-    lv_obj_t *logo = lv_image_create(parent);
-    lv_image_set_src(logo, &logo_dodge);
-    lv_obj_align(logo, LV_ALIGN_TOP_MID, 0, 4);
-
-    lv_obj_t *hint = make_box(parent, 34, 88, 136, 20, 0x130A18, COL_PURPLE, 10);
-    lv_obj_set_style_bg_opa(hint, LV_OPA_70, 0);
-    make_label(hint, "TOUCHER", COL_PURPLE, LV_ALIGN_CENTER, 0, 0);
+    /* Logos supprimés : dessin léger en LVGL. */
+    make_label(parent, "DODGE", COL_TEXT, LV_ALIGN_TOP_MID, 0, 18);
+    make_label(parent, "Esquive reflexe", COL_MUTED, LV_ALIGN_TOP_MID, 0, 48);
+    make_label(parent, "TOUCHER", COL_PURPLE, LV_ALIGN_BOTTOM_MID, 0, -12);
 }
 
 static void add_touch_hint(lv_obj_t *scr, const char *txt)
@@ -474,6 +489,75 @@ static void add_touch_hint(lv_obj_t *scr, const char *txt)
     lv_obj_t *hint = make_box(scr, 92, 236, 296, 26, 0x111827, COL_LINE, 13);
     lv_obj_set_style_bg_opa(hint, LV_OPA_80, 0);
     make_label(hint, txt, COL_MUTED, LV_ALIGN_CENTER, 0, 0);
+}
+
+/* Objets 2D rétro : beaux mais légers pour la STM32.
+   On évite les ombres et les effets dynamiques sur les objets mobiles. */
+static void make_child_block(lv_obj_t *parent, int x, int y, int w, int h,
+                             uint32_t color, int radius)
+{
+    lv_obj_t *b = lv_obj_create(parent);
+    lv_obj_set_size(b, w, h);
+    lv_obj_set_pos(b, x, y);
+    lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
+    lv_obj_set_style_border_width(b, 0, 0);
+    lv_obj_set_style_radius(b, radius, 0);
+    lv_obj_set_style_pad_all(b, 0, 0);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(b, LV_OBJ_FLAG_CLICKABLE);
+}
+
+static lv_obj_t *create_pixel_paddle(lv_obj_t *parent, uint32_t main_col, uint32_t edge_col)
+{
+    lv_obj_t *p = lv_obj_create(parent);
+    lv_obj_set_size(p, PADDLE_W + 8, PADDLE_H);
+    lv_obj_set_style_bg_opa(p, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(p, 0, 0);
+    lv_obj_set_style_pad_all(p, 0, 0);
+    lv_obj_clear_flag(p, LV_OBJ_FLAG_SCROLLABLE);
+
+    /* Contour + segments style borne d'arcade. */
+    make_child_block(p, 0, 0, PADDLE_W + 8, PADDLE_H, edge_col, 4);
+    make_child_block(p, 2, 3, PADDLE_W + 4, PADDLE_H - 6, main_col, 3);
+    make_child_block(p, 4, 10, PADDLE_W, 10, 0xFFFFFF, 2);
+    make_child_block(p, 4, PADDLE_H / 2 - 5, PADDLE_W, 10, 0xFFFFFF, 2);
+    make_child_block(p, 4, PADDLE_H - 20, PADDLE_W, 10, 0xFFFFFF, 2);
+    return p;
+}
+
+static lv_obj_t *create_pixel_ship(lv_obj_t *parent)
+{
+    lv_obj_t *ship = lv_obj_create(parent);
+    lv_obj_set_size(ship, DODGE_PLAYER_W, DODGE_PLAYER_H + 8);
+    lv_obj_set_style_bg_opa(ship, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ship, 0, 0);
+    lv_obj_set_style_pad_all(ship, 0, 0);
+    lv_obj_clear_flag(ship, LV_OBJ_FLAG_SCROLLABLE);
+
+    int mid = DODGE_PLAYER_W / 2;
+    make_child_block(ship, mid - 4, 0, 8, 8, COL_TEXT, 2);
+    make_child_block(ship, mid - 12, 7, 24, 8, COL_BLUE, 3);
+    make_child_block(ship, mid - 20, 15, 40, 9, COL_BLUE, 4);
+    make_child_block(ship, mid - 8, 18, 16, 7, 0xFFFFFF, 2);
+    make_child_block(ship, mid - 18, 24, 10, 4, COL_YELLOW, 2);
+    make_child_block(ship, mid + 8, 24, 10, 4, COL_YELLOW, 2);
+    return ship;
+}
+
+static lv_obj_t *create_pixel_obstacle(lv_obj_t *parent, uint32_t col)
+{
+    lv_obj_t *obs = lv_obj_create(parent);
+    lv_obj_set_size(obs, DODGE_OBS_W + 8, DODGE_OBS_H + 8);
+    lv_obj_set_style_bg_opa(obs, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obs, 0, 0);
+    lv_obj_set_style_pad_all(obs, 0, 0);
+    lv_obj_clear_flag(obs, LV_OBJ_FLAG_SCROLLABLE);
+
+    make_child_block(obs, 8, 0, 14, 6, col, 2);
+    make_child_block(obs, 2, 6, 28, 8, col, 2);
+    make_child_block(obs, 6, 14, 22, 8, col, 2);
+    make_child_block(obs, 12, 20, 10, 5, 0xFFFFFF, 2);
+    return obs;
 }
 
 
@@ -525,8 +609,14 @@ static void build_common_top_bar(const char *title_txt)
 static void build_menu(void);
 static void build_pong(void);
 static void build_dodge(void);
+static void build_calibration(void);
+static void build_info(void);
+static void build_audit(void);
 static void menu_pong_cb(lv_event_t *e);
 static void menu_dodge_cb(lv_event_t *e);
+static void menu_calibration_cb(lv_event_t *e);
+static void menu_info_cb(lv_event_t *e);
+static void menu_audit_cb(lv_event_t *e);
 static void menu_btn_event_cb(lv_event_t *e);
 static void restart_current_game_cb(lv_event_t *e);
 
@@ -582,6 +672,27 @@ static void show_result_screen(uint8_t victory, const char *restart_txt)
     lv_obj_center(lbl_menu);
 }
 
+
+/* Petit bouton glassmorphism pour le menu. */
+static lv_obj_t *make_menu_small_button(lv_obj_t *scr, const char *txt, int x, int y, int w)
+{
+    lv_obj_t *btn = lv_button_create(scr);
+    lv_obj_set_size(btn, w, 24);
+    lv_obj_set_pos(btn, x, y);
+    lv_obj_set_style_bg_color(btn, lv_color_hex(0x071427), 0);
+    lv_obj_set_style_bg_opa(btn, LV_OPA_70, 0);
+    lv_obj_set_style_border_color(btn, lv_color_hex(0x6AA8FF), 0);
+    lv_obj_set_style_border_width(btn, 1, 0);
+    lv_obj_set_style_radius(btn, 12, 0);
+    lv_obj_set_style_shadow_width(btn, 0, 0);
+
+    lv_obj_t *lbl = lv_label_create(btn);
+    lv_label_set_text(lbl, txt);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+    lv_obj_center(lbl);
+    return btn;
+}
+
 static void build_menu(void)
 {
     app_mode = APP_MENU;
@@ -590,55 +701,202 @@ static void build_menu(void)
     lv_obj_t *scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
 
-    /* Fond image du menu : menu_bg.c doit être dans src/images/.
-       On garde seulement cette grande image pour ne pas dépasser la FLASH. */
+    /* Fond menu moderne : l'image contient déjà les cartes et le décor. */
     lv_obj_t *menu_background = lv_image_create(scr);
     lv_image_set_src(menu_background, &menu_bg);
     lv_obj_set_pos(menu_background, 0, 0);
-    lv_obj_set_style_opa(menu_background, LV_OPA_90, 0);
+    lv_obj_clear_flag(menu_background, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_move_background(menu_background);
 
-    /* Effets LVGL légers par-dessus le fond. */
+    /* Zones tactiles transparentes sur les cartes du fond. */
+    lv_obj_t *btn_pong = lv_button_create(scr);
+    lv_obj_set_size(btn_pong, 172, 116);
+    lv_obj_set_pos(btn_pong, 24, 112);
+    lv_obj_set_style_bg_opa(btn_pong, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_pong, 0, 0);
+    lv_obj_set_style_shadow_width(btn_pong, 0, 0);
+    lv_obj_set_style_radius(btn_pong, 20, 0);
+    lv_obj_add_event_cb(btn_pong, menu_pong_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_dodge = lv_button_create(scr);
+    lv_obj_set_size(btn_dodge, 172, 116);
+    lv_obj_set_pos(btn_dodge, 220, 112);
+    lv_obj_set_style_bg_opa(btn_dodge, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(btn_dodge, 0, 0);
+    lv_obj_set_style_shadow_width(btn_dodge, 0, 0);
+    lv_obj_set_style_radius(btn_dodge, 20, 0);
+    lv_obj_add_event_cb(btn_dodge, menu_dodge_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_set_style_bg_color(btn_pong, lv_color_hex(COL_BLUE), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn_pong, LV_OPA_20, LV_STATE_PRESSED);
+    lv_obj_set_style_bg_color(btn_dodge, lv_color_hex(COL_PURPLE), LV_STATE_PRESSED);
+    lv_obj_set_style_bg_opa(btn_dodge, LV_OPA_20, LV_STATE_PRESSED);
+
+    /* Meilleurs scores : léger et utile pour la démo. */
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Best Pong G:%d  D:%d     Best Dodge:%lu", best_pong_left, best_pong_right, best_dodge_score);
+    lv_obj_t *best = lv_label_create(scr);
+    lv_label_set_text(best, buf);
+    lv_obj_set_style_text_color(best, lv_color_hex(0xDDEBFF), 0);
+    lv_obj_align(best, LV_ALIGN_TOP_MID, 0, 42);
+
+    /* Outils de soutenance : calibrage, audit capteurs, infos projet. */
+    lv_obj_t *btn_cal = make_menu_small_button(scr, "CALIBRAGE", 22, 238, 108);
+    lv_obj_add_event_cb(btn_cal, menu_calibration_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_audit = make_menu_small_button(scr, "AUDIT", 144, 238, 84);
+    lv_obj_add_event_cb(btn_audit, menu_audit_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *btn_info = make_menu_small_button(scr, "INFOS", 242, 238, 84);
+    lv_obj_add_event_cb(btn_info, menu_info_cb, LV_EVENT_CLICKED, NULL);
+}
+
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ECRANS OUTILS — CALIBRAGE / AUDIT / INFOS
+   ═════════════════════════════════════════════════════════════════════ */
+static void calibration_near_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    if (g_left_ok)  cal_left_near_cm = g_left_cm;
+    if (g_right_ok) cal_right_near_cm = g_right_cm;
+    build_calibration();
+}
+
+static void calibration_far_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    if (g_left_ok)  cal_left_far_cm = g_left_cm;
+    if (g_right_ok) cal_right_far_cm = g_right_cm;
+    build_calibration();
+}
+
+static void calibration_reset_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    cal_left_near_cm  = PONG_LEFT_MIN_CM;
+    cal_left_far_cm   = PONG_LEFT_MAX_CM;
+    cal_right_near_cm = PONG_RIGHT_MIN_CM;
+    cal_right_far_cm  = PONG_RIGHT_MAX_CM;
+    build_calibration();
+}
+
+static void build_calibration(void)
+{
+    app_mode = APP_CALIBRATION;
+    clear_screen();
+
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
     add_star_field(scr);
+    build_common_top_bar("CALIBRAGE CAPTEURS");
+    lv_obj_add_event_cb(common_btn_menu, menu_btn_event_cb, LV_EVENT_CLICKED, NULL);
 
-    /* Bandeau titre façon mini-console */
-    lv_obj_t *hero = make_box(scr, 18, 12, SCREEN_W - 36, 56, 0x101828, COL_BLUE, 16);
-    lv_obj_set_style_shadow_width(hero, 16, 0);
-    lv_obj_set_style_shadow_color(hero, lv_color_hex(COL_BLUE), 0);
-    lv_obj_set_style_shadow_opa(hero, LV_OPA_30, 0);
+    lv_obj_t *card = make_box(scr, 24, 48, SCREEN_W - 48, 150, 0x101828, COL_BLUE, 16);
+    lv_obj_set_style_bg_opa(card, LV_OPA_90, 0);
 
-    make_label(hero, "ULTRA ARCADE", COL_TEXT, LV_ALIGN_TOP_MID, 0, 8);
-    make_label(hero, "STM32F746G-DISCO  |  2 CAPTEURS SRF08  |  ECRAN TACTILE", COL_MUTED,
-               LV_ALIGN_BOTTOM_MID, 0, -8);
+    char buf[160];
+    snprintf(buf, sizeof(buf),
+             "Valeurs actuelles\\nGauche : %d cm   Droite : %d cm\\n\\nCalibrage Pong\\nG near:%d  G far:%d\\nD near:%d  D far:%d",
+             g_left_cm, g_right_cm, cal_left_near_cm, cal_left_far_cm, cal_right_near_cm, cal_right_far_cm);
 
-    /* Petits voyants capteurs */
-    lv_obj_t *chip_l = make_box(scr, 30, 76, 120, 22, 0x0B1220, COL_BLUE, 11);
-    make_label(chip_l, "CAPTEUR G", COL_BLUE, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_t *chip_r = make_box(scr, SCREEN_W - 150, 76, 120, 22, 0x0B1220, COL_YELLOW, 11);
-    make_label(chip_r, "CAPTEUR D", COL_YELLOW, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_label_set_text(lbl, buf);
+    lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 16, 14);
 
-    /* Cartes jeux avec fausses images dessinées en LVGL */
-    lv_obj_t *btn1 = lv_button_create(scr);
-    lv_obj_set_size(btn1, 204, 116);
-    lv_obj_align(btn1, LV_ALIGN_CENTER, -112, 16);
-    style_panel(btn1, 0x111827, COL_BLUE, 18);
-    lv_obj_set_style_shadow_color(btn1, lv_color_hex(COL_BLUE), 0);
-    lv_obj_set_style_shadow_width(btn1, 18, 0);
-    lv_obj_set_style_shadow_opa(btn1, LV_OPA_30, 0);
-    lv_obj_add_event_cb(btn1, menu_pong_cb, LV_EVENT_CLICKED, NULL);
-    add_pong_card_art(btn1);
+    lv_obj_t *btn_near = make_menu_small_button(scr, "MAIN PROCHE", 34, 212, 124);
+    lv_obj_add_event_cb(btn_near, calibration_near_cb, LV_EVENT_CLICKED, NULL);
 
-    lv_obj_t *btn2 = lv_button_create(scr);
-    lv_obj_set_size(btn2, 204, 116);
-    lv_obj_align(btn2, LV_ALIGN_CENTER, 112, 16);
-    style_panel(btn2, 0x111827, COL_PURPLE, 18);
-    lv_obj_set_style_shadow_color(btn2, lv_color_hex(COL_PURPLE), 0);
-    lv_obj_set_style_shadow_width(btn2, 18, 0);
-    lv_obj_set_style_shadow_opa(btn2, LV_OPA_30, 0);
-    lv_obj_add_event_cb(btn2, menu_dodge_cb, LV_EVENT_CLICKED, NULL);
-    add_dodge_card_art(btn2);
+    lv_obj_t *btn_far = make_menu_small_button(scr, "MAIN LOIN", 178, 212, 112);
+    lv_obj_add_event_cb(btn_far, calibration_far_cb, LV_EVENT_CLICKED, NULL);
 
-    make_label(scr, "Touchez une carte pour lancer un jeu", COL_TEXT, LV_ALIGN_BOTTOM_MID, 0, -22);
+    lv_obj_t *btn_reset = make_menu_small_button(scr, "RESET", 310, 212, 76);
+    lv_obj_add_event_cb(btn_reset, calibration_reset_cb, LV_EVENT_CLICKED, NULL);
+}
+
+static void audit_update_screen(void)
+{
+    if (!audit_lbl_left || !audit_lbl_right || !audit_lbl_quality) return;
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "Capteur gauche : %s  %d cm", g_left_ok ? "OK" : "KO", g_left_cm);
+    lv_label_set_text(audit_lbl_left, buf);
+
+    snprintf(buf, sizeof(buf), "Capteur droit  : %s  %d cm", g_right_ok ? "OK" : "KO", g_right_cm);
+    lv_label_set_text(audit_lbl_right, buf);
+
+    const char *quality = "BON";
+    uint32_t col = COL_GREEN;
+    if (!g_left_ok || !g_right_ok) {
+        quality = "PROBLEME I2C / MESURE";
+        col = COL_RED;
+    } else if (g_left_cm < 4 || g_right_cm < 4 || g_left_cm > 110 || g_right_cm > 110) {
+        quality = "HORS ZONE";
+        col = COL_YELLOW;
+    }
+
+    lv_label_set_text(audit_lbl_quality, quality);
+    lv_obj_set_style_text_color(audit_lbl_quality, lv_color_hex(col), 0);
+}
+
+static void build_audit(void)
+{
+    app_mode = APP_AUDIT;
+    clear_screen();
+
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
+    add_star_field(scr);
+    build_common_top_bar("AUDIT CAPTEURS");
+    lv_obj_add_event_cb(common_btn_menu, menu_btn_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *card = make_box(scr, 40, 58, SCREEN_W - 80, 136, 0x101828, COL_GREEN, 16);
+    lv_obj_set_style_bg_opa(card, LV_OPA_90, 0);
+
+    audit_lbl_left = lv_label_create(card);
+    lv_obj_set_style_text_color(audit_lbl_left, lv_color_hex(COL_TEXT), 0);
+    lv_obj_align(audit_lbl_left, LV_ALIGN_TOP_LEFT, 18, 18);
+
+    audit_lbl_right = lv_label_create(card);
+    lv_obj_set_style_text_color(audit_lbl_right, lv_color_hex(COL_TEXT), 0);
+    lv_obj_align(audit_lbl_right, LV_ALIGN_TOP_LEFT, 18, 50);
+
+    audit_lbl_quality = lv_label_create(card);
+    lv_label_set_text(audit_lbl_quality, "---");
+    lv_obj_align(audit_lbl_quality, LV_ALIGN_TOP_LEFT, 18, 90);
+
+    make_label(scr, "Cet ecran sert a verifier les mesures en direct pendant la soutenance.", COL_MUTED, LV_ALIGN_BOTTOM_MID, 0, -34);
+
+    audit_update_screen();
+}
+
+static void build_info(void)
+{
+    app_mode = APP_INFO;
+    clear_screen();
+
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(COL_BG), 0);
+    add_star_field(scr);
+    build_common_top_bar("INFOS PROJET");
+    lv_obj_add_event_cb(common_btn_menu, menu_btn_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *card = make_box(scr, 26, 48, SCREEN_W - 52, 168, 0x101828, COL_PURPLE, 16);
+    lv_obj_set_style_bg_opa(card, LV_OPA_90, 0);
+
+    lv_obj_t *lbl = lv_label_create(card);
+    lv_label_set_text(lbl,
+        "Projet : mini-console STM32\\n"
+        "Carte : STM32F746G-DISCO\\n"
+        "Affichage : LVGL + ecran tactile\\n"
+        "Capteurs : 2 x SRF08 sur bus I2C\\n"
+        "Adresses : gauche 0x70 / droite 0x71\\n"
+        "Jeux : Pong Ultrason + Dodge Ultrason\\n"
+        "Optimisations : filtrage, calibrage, mesure paire, menu moderne");
+    lv_obj_set_style_text_color(lbl, lv_color_hex(COL_TEXT), 0);
+    lv_obj_align(lbl, LV_ALIGN_TOP_LEFT, 18, 16);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -746,23 +1004,14 @@ static void build_pong(void)
     lv_obj_t *glow_r = make_box(scr, SCREEN_W - 12, PLAY_TOP + 18, 6, PLAY_BOTTOM - PLAY_TOP - 36, COL_YELLOW, 0, 3);
     lv_obj_set_style_bg_opa(glow_r, LV_OPA_50, 0);
 
-    pong.paddle_left = lv_obj_create(scr);
-    lv_obj_set_size(pong.paddle_left, PADDLE_W, PADDLE_H);
-    style_plain_obj(pong.paddle_left, COL_BLUE, 6);
-    lv_obj_set_style_shadow_width(pong.paddle_left, 8, 0);
-    lv_obj_set_style_shadow_color(pong.paddle_left, lv_color_hex(COL_BLUE), 0);
-
-    pong.paddle_right = lv_obj_create(scr);
-    lv_obj_set_size(pong.paddle_right, PADDLE_W, PADDLE_H);
-    style_plain_obj(pong.paddle_right, COL_YELLOW, 6);
-    lv_obj_set_style_shadow_width(pong.paddle_right, 8, 0);
-    lv_obj_set_style_shadow_color(pong.paddle_right, lv_color_hex(COL_YELLOW), 0);
+    /* Raquettes pixel-art : rendu rétro propre, beaucoup plus fluide que des ombres/glow. */
+    pong.paddle_left = create_pixel_paddle(scr, COL_BLUE, 0x004C66);
+    pong.paddle_right = create_pixel_paddle(scr, COL_YELLOW, 0x6A5200);
 
     pong.ball = lv_obj_create(scr);
-    lv_obj_set_size(pong.ball, BALL_SIZE, BALL_SIZE);
-    style_plain_obj(pong.ball, COL_TEXT, BALL_SIZE / 2);
-    lv_obj_set_style_shadow_width(pong.ball, 14, 0);
-    lv_obj_set_style_shadow_color(pong.ball, lv_color_hex(COL_TEXT), 0);
+    lv_obj_set_size(pong.ball, BALL_SIZE + 2, BALL_SIZE + 2);
+    style_plain_obj(pong.ball, COL_TEXT, LV_RADIUS_CIRCLE);
+    lv_obj_clear_flag(pong.ball, LV_OBJ_FLAG_SCROLLABLE);
 
     make_label(scr, "P1", COL_BLUE, LV_ALIGN_LEFT_MID, 20, -96);
     make_label(scr, "P2", COL_YELLOW, LV_ALIGN_RIGHT_MID, -20, -96);
@@ -854,8 +1103,13 @@ static void pong_step(void)
 
     if (pong.score_left >= WIN_SCORE || pong.score_right >= WIN_SCORE) {
         pong.state = GAME_OVER;
-        if (pong.score_left > pong.score_right) pong_set_message("FIN — joueur GAUCHE gagne !");
-        else                                    pong_set_message("FIN — joueur DROIT gagne !");
+        if (pong.score_left > pong.score_right) {
+            pong_set_message("FIN — joueur GAUCHE gagne !");
+            if (best_pong_left < 255) best_pong_left++;
+        } else {
+            pong_set_message("FIN — joueur DROIT gagne !");
+            if (best_pong_right < 255) best_pong_right++;
+        }
         lv_label_set_text(pong.lbl_btn, "RESTART");
         show_result_screen(1, "REJOUER");
         return;
@@ -979,22 +1233,11 @@ static void build_dodge(void)
     lv_obj_set_style_text_color(dodge.lbl_score, lv_color_hex(COL_TEXT), 0);
     lv_obj_align(dodge.lbl_score, LV_ALIGN_TOP_MID, 0, 28);
 
-    dodge.player = lv_obj_create(scr);
-    lv_obj_set_size(dodge.player, DODGE_PLAYER_W, DODGE_PLAYER_H);
-    style_plain_obj(dodge.player, COL_BLUE, 8);
-    lv_obj_set_style_shadow_width(dodge.player, 16, 0);
-    lv_obj_set_style_shadow_color(dodge.player, lv_color_hex(COL_BLUE), 0);
-    lv_obj_set_style_shadow_opa(dodge.player, LV_OPA_50, 0);
-    make_label(dodge.player, "SHIP", 0x00111A, LV_ALIGN_CENTER, 0, 0);
+    /* Vaisseau et obstacles pixel-art : pas d'ombres sur les objets mobiles = meilleur FPS. */
+    dodge.player = create_pixel_ship(scr);
 
     for (uint8_t i = 0; i < DODGE_MAX_OBS; i++) {
-        dodge.obstacles[i] = lv_obj_create(scr);
-        lv_obj_set_size(dodge.obstacles[i], DODGE_OBS_W, DODGE_OBS_H);
-        style_plain_obj(dodge.obstacles[i], (i % 2) ? COL_YELLOW : COL_RED, 6);
-        lv_obj_set_style_transform_angle(dodge.obstacles[i], (i % 2) ? 120 : -120, 0);
-        lv_obj_set_style_shadow_width(dodge.obstacles[i], 10, 0);
-        lv_obj_set_style_shadow_opa(dodge.obstacles[i], LV_OPA_40, 0);
-        lv_obj_set_style_shadow_color(dodge.obstacles[i], lv_color_hex((i % 2) ? COL_YELLOW : COL_RED), 0);
+        dodge.obstacles[i] = create_pixel_obstacle(scr, (i % 2) ? COL_YELLOW : COL_RED);
     }
 
     dodge.lbl_info = lv_label_create(scr);
@@ -1073,6 +1316,7 @@ static void dodge_step(void)
         if (rects_collide(dodge.player_x, dodge.player_y, DODGE_PLAYER_W, DODGE_PLAYER_H,
                           dodge.obs_x[i], dodge.obs_y[i], DODGE_OBS_W, DODGE_OBS_H)) {
             dodge.state = GAME_OVER;
+            if (dodge.score > best_dodge_score) best_dodge_score = dodge.score;
             dodge_set_message("PERDU — touche RESTART");
             lv_label_set_text(dodge.lbl_btn, "RESTART");
             show_result_screen(0, "REJOUER");
@@ -1094,6 +1338,24 @@ static void menu_dodge_cb(lv_event_t *e)
 {
     LV_UNUSED(e);
     build_dodge();
+}
+
+static void menu_calibration_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    build_calibration();
+}
+
+static void menu_info_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    build_info();
+}
+
+static void menu_audit_cb(lv_event_t *e)
+{
+    LV_UNUSED(e);
+    build_audit();
 }
 
 static void menu_btn_event_cb(lv_event_t *e)
@@ -1150,6 +1412,8 @@ static void app_update_from_sensors(SRF08_Result_t *left, SRF08_Result_t *right)
     } else if (app_mode == APP_DODGE) {
         dodge_update_from_sensors();
         dodge_step();
+    } else if (app_mode == APP_AUDIT) {
+        audit_update_screen();
     }
 }
 
