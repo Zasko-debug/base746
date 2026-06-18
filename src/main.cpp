@@ -149,9 +149,9 @@ static void SRF08_Measure(uint8_t addr, SRF08_Result_t *result)
 #define SENSOR_MIN_VALID_CM   3
 #define SENSOR_MAX_VALID_CM   120
 #define FILTER_BUF_SIZE       3
-#define FILTER_ALPHA_NUM      55   /* équilibre : réactif sans être nerveux */
+#define FILTER_ALPHA_NUM      85   /* anti-retard : suit vite quand la main arrive */
 #define FILTER_ALPHA_DEN      100
-#define FILTER_MAX_STEP_CM     8   /* évite qu'une valeur parasite envoie la raquette en haut/bas */
+#define FILTER_MAX_STEP_CM    25   /* plus de retard visible, sans téléportation brutale */
 
 typedef struct {
     uint16_t buf[FILTER_BUF_SIZE];
@@ -186,6 +186,12 @@ static uint16_t sensor_filter_push(SensorFilter_t *f, uint16_t raw_cm)
         med = median3(f->buf[0], f->buf[1], f->buf[2]);
     } else if (f->count == 2) {
         med = (uint16_t)((f->buf[0] + f->buf[1]) / 2);
+    }
+
+    /* Anti-retard : quand la main arrive vite, la distance chute d'un coup.
+       On accepte cette baisse immédiatement au lieu d'attendre 2-3 mesures médianes. */
+    if (f->initialized && raw_cm + 18 < f->filtered_cm) {
+        med = raw_cm;
     }
 
     if (!f->initialized) {
@@ -239,8 +245,8 @@ static uint16_t get_filtered_cm(const SensorFilter_t *f)
 #define LEFT_X          18
 #define RIGHT_X        (SCREEN_W - LEFT_X - PADDLE_W)
 #define WIN_SCORE        5
-#define PONG_BALL_SPEED_START 4
-#define PONG_BALL_SPEED_MAX    9
+#define PONG_BALL_SPEED_START 6
+#define PONG_BALL_SPEED_MAX   9
 
 /* Réglage Pong séparé gauche/droite.
    Le capteur jaune/droit peut parfois lire trop court : on évite donc
@@ -250,8 +256,8 @@ static uint16_t get_filtered_cm(const SensorFilter_t *f)
 #define PONG_RIGHT_MIN_CM     10
 #define PONG_RIGHT_MAX_CM     45
 #define PONG_PADDLE_MARGIN     8
-#define PONG_Y_MAX_STEP       14
-#define PONG_Y_FOLLOW_NUM     55
+#define PONG_Y_MAX_STEP       20
+#define PONG_Y_FOLLOW_NUM     75
 #define PONG_Y_FOLLOW_DEN    100
 
 #define COL_BG          0x080B12
@@ -270,6 +276,16 @@ static uint16_t get_filtered_cm(const SensorFilter_t *f)
 #define DODGE_OBS_W      22
 #define DODGE_OBS_H      18
 #define DODGE_MAX_OBS     4
+
+/* Fluidité : le jeu est rafraîchi plus souvent que les capteurs.
+   Le SRF08 reste limité physiquement autour de 65-70 ms, donc on évite de
+   bloquer l'animation pendant la mesure. */
+#define GAME_FRAME_MS          20
+#define SENSOR_PERIOD_MS       75
+#define SENSOR_MEASURE_WAIT_MS 68
+
+/* Animation légère du menu : petits objets uniquement, aucun fond animé lourd. */
+#define MENU_STAR_COUNT        18
 
 typedef enum {
     APP_MENU = 0,
@@ -312,6 +328,14 @@ static lv_obj_t *common_btn_menu = NULL;
 static lv_obj_t *common_lbl_menu = NULL;
 static lv_obj_t *common_lbl_left = NULL;
 static lv_obj_t *common_lbl_right = NULL;
+
+/* Objets animés du menu. Ils sont créés uniquement dans le menu, puis détruits
+   automatiquement par clear_screen(). */
+static lv_obj_t *menu_stars[MENU_STAR_COUNT] = {0};
+static lv_obj_t *menu_scan_1 = NULL;
+static lv_obj_t *menu_scan_2 = NULL;
+static lv_obj_t *menu_pulse_lbl = NULL;
+static uint16_t menu_anim_tick = 0;
 
 static int clamp_int(int v, int min_v, int max_v)
 {
@@ -369,6 +393,12 @@ static void clear_screen(void)
     common_lbl_menu = NULL;
     common_lbl_left = NULL;
     common_lbl_right = NULL;
+
+    for (uint8_t i = 0; i < MENU_STAR_COUNT; i++) menu_stars[i] = NULL;
+    menu_scan_1 = NULL;
+    menu_scan_2 = NULL;
+    menu_pulse_lbl = NULL;
+    menu_anim_tick = 0;
 }
 
 /* Affiche une image plein écran en fond.
@@ -693,6 +723,72 @@ static lv_obj_t *make_menu_small_button(lv_obj_t *scr, const char *txt, int x, i
     return btn;
 }
 
+
+static void build_menu_anim_objects(lv_obj_t *scr)
+{
+    static const uint16_t star_pos[MENU_STAR_COUNT][2] = {
+        {20, 52}, {58, 25}, {94, 76}, {130, 45}, {170, 92}, {218, 30},
+        {260, 70}, {305, 22}, {340, 96}, {382, 56}, {430, 35}, {462, 88},
+        {38, 188}, {116, 230}, {206, 198}, {300, 226}, {390, 188}, {450, 230}
+    };
+
+    for (uint8_t i = 0; i < MENU_STAR_COUNT; i++) {
+        menu_stars[i] = lv_obj_create(scr);
+        lv_obj_set_size(menu_stars[i], 2 + (i % 2), 2 + (i % 2));
+        lv_obj_set_pos(menu_stars[i], star_pos[i][0], star_pos[i][1]);
+        lv_obj_set_style_bg_color(menu_stars[i], lv_color_hex((i % 3) ? 0xBFE7FF : 0xFFFFFF), 0);
+        lv_obj_set_style_bg_opa(menu_stars[i], LV_OPA_60, 0);
+        lv_obj_set_style_border_width(menu_stars[i], 0, 0);
+        lv_obj_set_style_radius(menu_stars[i], 3, 0);
+        lv_obj_clear_flag(menu_stars[i], LV_OBJ_FLAG_CLICKABLE);
+    }
+
+    menu_scan_1 = make_box(scr, 0, 106, SCREEN_W, 2, COL_BLUE, 0, 0);
+    lv_obj_set_style_bg_opa(menu_scan_1, 90, 0);
+    lv_obj_clear_flag(menu_scan_1, LV_OBJ_FLAG_CLICKABLE);
+
+    menu_scan_2 = make_box(scr, 0, 232, SCREEN_W, 2, COL_PURPLE, 0, 0);
+    lv_obj_set_style_bg_opa(menu_scan_2, LV_OPA_30, 0);
+    lv_obj_clear_flag(menu_scan_2, LV_OBJ_FLAG_CLICKABLE);
+
+    menu_pulse_lbl = lv_label_create(scr);
+    lv_label_set_text(menu_pulse_lbl, "TOUCH  TO  PLAY");
+    lv_obj_set_style_text_color(menu_pulse_lbl, lv_color_hex(0xEAF6FF), 0);
+    lv_obj_align(menu_pulse_lbl, LV_ALIGN_BOTTOM_MID, 0, -6);
+    lv_obj_clear_flag(menu_pulse_lbl, LV_OBJ_FLAG_CLICKABLE);
+}
+
+static void menu_anim_step(void)
+{
+    if (app_mode != APP_MENU) return;
+
+    menu_anim_tick++;
+
+    for (uint8_t i = 0; i < MENU_STAR_COUNT; i++) {
+        if (!menu_stars[i]) continue;
+        lv_coord_t x = lv_obj_get_x(menu_stars[i]);
+        lv_coord_t y = lv_obj_get_y(menu_stars[i]);
+        y += 1 + (i % 2);
+        if (y > SCREEN_H - 18) y = 18 + ((i * 13) % 40);
+        lv_obj_set_pos(menu_stars[i], x, y);
+    }
+
+    if (menu_scan_1) {
+        int y = 98 + (menu_anim_tick % 34);
+        lv_obj_set_y(menu_scan_1, y);
+    }
+    if (menu_scan_2) {
+        int y = 226 - (menu_anim_tick % 26);
+        lv_obj_set_y(menu_scan_2, y);
+    }
+
+    if (menu_pulse_lbl) {
+        uint8_t phase = menu_anim_tick % 24;
+        lv_opa_t opa = (phase < 12) ? (LV_OPA_50 + phase * 4) : (LV_OPA_50 + (24 - phase) * 4);
+        lv_obj_set_style_text_opa(menu_pulse_lbl, opa, 0);
+    }
+}
+
 static void build_menu(void)
 {
     app_mode = APP_MENU;
@@ -707,6 +803,9 @@ static void build_menu(void)
     lv_obj_set_pos(menu_background, 0, 0);
     lv_obj_clear_flag(menu_background, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_move_background(menu_background);
+
+    /* Animation arcade légère par-dessus le fond : étoiles + scanlines + texte pulsé. */
+    build_menu_anim_objects(scr);
 
     /* Zones tactiles transparentes sur les cartes du fond. */
     lv_obj_t *btn_pong = lv_button_create(scr);
@@ -1402,11 +1501,11 @@ static void update_sensor_cache(SRF08_Result_t *left, SRF08_Result_t *right)
     update_common_distance_labels();
 }
 
-static void app_update_from_sensors(SRF08_Result_t *left, SRF08_Result_t *right)
+static void app_tick_current_screen(void)
 {
-    update_sensor_cache(left, right);
-
-    if (app_mode == APP_PONG) {
+    if (app_mode == APP_MENU) {
+        menu_anim_step();
+    } else if (app_mode == APP_PONG) {
         pong_update_from_sensors();
         pong_step();
     } else if (app_mode == APP_DODGE) {
@@ -1415,6 +1514,12 @@ static void app_update_from_sensors(SRF08_Result_t *left, SRF08_Result_t *right)
     } else if (app_mode == APP_AUDIT) {
         audit_update_screen();
     }
+}
+
+static void app_update_from_sensors(SRF08_Result_t *left, SRF08_Result_t *right)
+{
+    update_sensor_cache(left, right);
+    app_tick_current_screen();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════
@@ -1432,23 +1537,53 @@ void myTask(void *pvParameters)
 {
     (void)pvParameters;
     vTaskDelay(pdMS_TO_TICKS(500));
+
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    SRF08_Result_t res_left, res_right;
+    SRF08_Result_t res_left = {0}, res_right = {0};
+
+    uint8_t measure_pending = 0;
+    uint8_t start_left_ok = 0;
+    uint8_t start_right_ok = 0;
+    uint32_t measure_start_ms = 0;
+    uint32_t last_start_ms = 0;
 
     while (1)
     {
-        /* Mesures quasi simultanées : on lance les 2 capteurs, puis on attend une seule fois. */
-        SRF08_MeasurePair(&res_left, &res_right);
+        uint32_t now = millis();
 
+        /* Démarrage non bloquant des mesures SRF08.
+           Les capteurs travaillent pendant que LVGL continue à animer le jeu/menu. */
+        if (!measure_pending && (now - last_start_ms >= SENSOR_PERIOD_MS)) {
+            measure_start_ms = now;
+            last_start_ms = now;
+            start_left_ok  = SRF08_StartMeasure(SRF08_ADDR_LEFT);
+            start_right_ok = SRF08_StartMeasure(SRF08_ADDR_RIGHT);
+            measure_pending = 1;
+        }
+
+        /* Lecture des résultats quand les ultrasons ont eu le temps de revenir. */
+        if (measure_pending && (now - measure_start_ms >= SENSOR_MEASURE_WAIT_MS)) {
+            if (start_left_ok)  SRF08_ReadResult(SRF08_ADDR_LEFT, &res_left, measure_start_ms);
+            else                res_left.valid = 0;
+
+            if (start_right_ok) SRF08_ReadResult(SRF08_ADDR_RIGHT, &res_right, measure_start_ms);
+            else                res_right.valid = 0;
+
+            lvglLock();
+            update_sensor_cache(&res_left, &res_right);
+            lvglUnlock();
+
+            measure_pending = 0;
+        }
+
+        /* Rafraîchissement graphique plus fréquent que les capteurs : beaucoup plus fluide. */
         lvglLock();
-        app_update_from_sensors(&res_left, &res_right);
+        app_tick_current_screen();
         lvglUnlock();
 
-        /* La mesure des 2 capteurs prend maintenant environ 70 ms au lieu de 140 ms. */
-        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(75));
+        vTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(GAME_FRAME_MS));
     }
 }
-
 #else
 /* ─── Stub simulateur desktop ─────────────────────────────────────── */
 #include "app_hal.h"
